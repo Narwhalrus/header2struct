@@ -1,8 +1,13 @@
+#!/usr/bin/python
+
 from __future__ import print_function
 import sys
+import ctypes
+import json
+from collections import OrderedDict
 from pprint import pprint
 
-sys.path.extend(['./pycparser', './pycparser/pycparser'])
+#sys.path.extend(['./pycparser', './pycparser/pycparser'])
 
 from pycparser import parse_file, c_parser, c_ast
 
@@ -98,7 +103,89 @@ def generate_struct_defs(filename):
   sv = struct_visitor()
   sv.visit(ast)
   return sv.structs
+
+c_type_map = {
+    'int': ctypes.c_int,
+    'unsigned int': ctypes.c_uint,
+    'unsigned': ctypes.c_uint,
+    'char': ctypes.c_byte,
+    'unsigned char': ctypes.c_ubyte,
+    'float': ctypes.c_float,
+    'double': ctypes.c_double,
+    'short': ctypes.c_short,
+    'unsigned short': ctypes.c_ushort
+}
+
+def generate_ctypes_struct(struct_defs, struct_name):
+  struct_def = struct_defs[struct_name]
+  struct_fields = []
+
+  for field in struct_def:
+    varname, typename, dims = field
+    field_type = c_type_map.get(typename)
+    # Right now type is either a basic type or a struct in our struct_defs
+    if field_type == None:
+      if typename == '<anonymous_struct>':
+        typename = varname
+      field_type = generate_ctypes_struct(struct_defs, typename)
+
+    # Handle array types
+    for dim in dims:
+      if dim > 1:
+        field_type *= dim
+
+    struct_fields.append((varname, field_type))
     
+  class temp_struct(ctypes.Structure):
+    _fields_ = struct_fields
+
+    # Add this load method to make loading from a
+    # python byte string easier
+    def load(self, bytes):
+      fit = min(len(bytes), ctypes.sizeof(self))
+      ctypes.memmove(ctypes.addressof(self), bytes, fit)
+
+  temp_struct.__name__ = struct_name
+
+  return temp_struct
+
+#TODO: This can be made better.
+def getdict(struct):
+  result = OrderedDict()
+  for field, _ in struct._fields_:
+    value = getattr(struct, field)
+    if (type(value) not in [int, long, float, bool]) and not bool(value):
+      value = None
+    elif hasattr(value, "_length_") and hasattr(value, "_type_"):
+      value = list(value)
+      if hasattr(value[0], "_fields_"):
+        value = [getdict(s) for s in value]
+    elif hasattr(value, "_fields_"):
+      value = getdict(value)
+    result[field] = value
+
+  return result
+
+  
 
 if __name__ == '__main__':
-  pprint(generate_struct_defs(sys.argv[1]))
+  struct_defs = generate_struct_defs(sys.argv[1])
+  print('Struct defs:')
+  pprint(struct_defs)
+  print()
+
+  print('Generating ctypes Structure...')
+  gened_struct = generate_ctypes_struct(struct_defs, 'mmd_to_avncs_type')
+  print('Gened struct:')
+  print('\ttype:', type(gened_struct))
+  print('\tsizeof:', ctypes.sizeof(gened_struct))
+  print('\tfields:')
+  for field in gened_struct._fields_:
+    print('\t\t', field)
+  print()
+
+  gs = gened_struct()
+  json_out = json.dumps(getdict(gs), indent=4, separators=(',',': '))
+  print(json_out)
+
+

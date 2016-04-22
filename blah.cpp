@@ -1,15 +1,12 @@
 #include <string>
 #include <iostream>
 
+#include "test.h"
+
 using namespace std;
 
 int main()
 {
-  string str;
-  while(getline(std::cin, str, ' ')) {
-    cout << str << endl;
-  }
-
-  return 0;
+  cout << sizeof(nd_struct) << endl;
 }
 
