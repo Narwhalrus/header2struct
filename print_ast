@@ -1,0 +1,11 @@
+#!/usr/bin/python
+
+import sys
+from pycparser import parse_file
+
+if len(sys.argv) < 2:
+  print 'Nope.'
+  exit(1)
+
+ast = parse_file(sys.argv[1], use_cpp=True)
+ast.show()
