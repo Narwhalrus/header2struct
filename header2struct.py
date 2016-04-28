@@ -4,12 +4,14 @@ from __future__ import print_function
 import sys
 import ctypes
 import json
+import struct
 from collections import OrderedDict
 from pprint import pprint
 
-#sys.path.extend(['./pycparser', './pycparser/pycparser'])
+sys.path.extend(['./pycparser', './pycparser/pycparser', './pycparserext', './pycparserext/pycparserext'])
 
 from pycparser import parse_file, c_parser, c_ast
+#from pycparserext.ext_c_parser import GnuCParser
 
 # This class takes a single Struct AST node and parses out all the fields
 class struct_def_generator(c_ast.NodeVisitor):
@@ -98,7 +100,9 @@ class struct_visitor(c_ast.NodeVisitor):
     self.current_parent = old_parent
 
 def generate_struct_defs(filename):
+  #p = GnuCParser()
   ast = parse_file(filename, use_cpp=True)
+  #ast = p.parse(open(filename, 'rb').read())
   ast.show()
   sv = struct_visitor()
   sv.visit(ast)
@@ -150,10 +154,10 @@ def generate_ctypes_struct(struct_defs, struct_name):
   return temp_struct
 
 #TODO: This can be made better.
-def getdict(struct):
+def getdict(ct_struct):
   result = OrderedDict()
-  for field, _ in struct._fields_:
-    value = getattr(struct, field)
+  for field, _ in ct_struct._fields_:
+    value = getattr(ct_struct, field)
     if (type(value) not in [int, long, float, bool]) and not bool(value):
       value = None
     elif hasattr(value, "_length_") and hasattr(value, "_type_"):
@@ -166,7 +170,18 @@ def getdict(struct):
 
   return result
 
-  
+
+def read_simple_bin_file(filename, struct_type):
+  with open(filename, 'rb') as ifile:
+    struct_size = struct.unpack('I', ifile.read(4))[0]
+    print(struct_size)
+
+    s = struct_type() 
+    for frame in iter(lambda: ifile.read(struct_size), ''):
+      s.load(frame)
+      print(json.dumps(getdict(s), indent=4, separators=(',',': ')))
+      
+
 
 if __name__ == '__main__':
   struct_defs = generate_struct_defs(sys.argv[1])
@@ -175,7 +190,7 @@ if __name__ == '__main__':
   print()
 
   print('Generating ctypes Structure...')
-  gened_struct = generate_ctypes_struct(struct_defs, 'mmd_to_avncs_type')
+  gened_struct = generate_ctypes_struct(struct_defs, 'nd_struct')
   print('Gened struct:')
   print('\ttype:', type(gened_struct))
   print('\tsizeof:', ctypes.sizeof(gened_struct))
@@ -187,5 +202,7 @@ if __name__ == '__main__':
   gs = gened_struct()
   json_out = json.dumps(getdict(gs), indent=4, separators=(',',': '))
   print(json_out)
+
+  read_simple_bin_file('outbin.bin', gened_struct)
 
 
