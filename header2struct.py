@@ -8,15 +8,16 @@ import struct
 from collections import OrderedDict
 from pprint import pprint
 
-sys.path.extend(['./pycparser', './pycparser/pycparser', './pycparserext', './pycparserext/pycparserext'])
 
-from pycparser import parse_file, c_parser, c_ast
-#from pycparserext.ext_c_parser import GnuCParser
-
+try:
+  from pycparser import parse_file, c_parser, c_ast
+except ImportError:
+  sys.path.extend(['./pycparser', './pycparser/pycparser', './pycparserext', './pycparserext/pycparserext'])
+  from pycparser import parse_file, c_parser, c_ast
+  
 # This class takes a single Struct AST node and parses out all the fields
 class struct_def_generator(c_ast.NodeVisitor):
   def __init__(self, struct_id):
-    print('Generating struct for', struct_id)
     self.struct_id = struct_id
     self.fields = []
 
@@ -27,6 +28,12 @@ class struct_def_generator(c_ast.NodeVisitor):
   # TODO: This method probably isn't very robust right now. 
   def visit_Decl(self, node):
     name = node.name
+    # For unnamed structs and unions 
+    if name == None:
+      #name = self.struct_id
+      # If our decl is unnamed, just name it after the type
+      name = node.type.name
+
     dims = []
     # TODO: Assumption: type will either be a TypeDecl (basic types and structs),
     # or an ArrayDecl.
@@ -50,10 +57,13 @@ class struct_def_generator(c_ast.NodeVisitor):
     # Try testing with a typedef of a basic type and see what happens.
     # I'll probably have to keep track of all typedefs and resolve at some
     # point...
-    type = type.type
+    if isinstance(type, c_ast.TypeDecl):
+      type = type.type
+    else:
+      print('I guess this doesnt have a type decl...')
 
     # Handle structs and basic types differently
-    if isinstance(type, c_ast.Struct):
+    if isinstance(type, c_ast.Struct) or isinstance(type, c_ast.Union):
       # If structure name is None, we're dealing with an anonymous struct
       if type.name == None:
         typename = '<anonymous_struct>' 
@@ -74,16 +84,56 @@ class struct_visitor(c_ast.NodeVisitor):
   def __init__(self):
     self.current_parent = None
     self.structs = {}
+    self.unions = {}
+    self._unnamed_unions = 1
+    self._unnamed_structs = 1
 
   def visit_Struct(self, node):
     if len(node.children()) > 0:
       if node.name == None:
         name = self.current_parent.declname
+        # Looks like an anonymous struct or a typedef'd struct. Just make the name the
+        # typename or varname
+        if isinstance(self.current_parent, c_ast.TypeDecl):
+          name = self.current_parent.declname
+        else:
+          #name = 'unnamed_struct_%d' % (self._unnamed_structs)
+          node.name = 'unnamed_struct_%d' % (self._unnamed_structs)
+          name = node.name
+          #name = 'unnamed'
+          self._unnamed_structs += 1
       else:
         name = node.name
 
-      s_gen = struct_def_generator(name)
-      self.structs[name] = s_gen.generate(node)
+      #s_gen = struct_def_generator(name)
+      #self.structs[name] = s_gen.generate(node)
+      self.structs[name] = node
+
+    old_parent = self.current_parent
+    self.current_parent = node
+    for c_name, c in node.children():
+      self.visit(c)
+    self.current_parent = old_parent
+
+  # Only difference between struct and union visitor is the dict it stores definitions in
+  def visit_Union(self, node):
+    if len(node.children()) > 0:
+      if node.name == None:
+        # Looks like an anonymous struct or a typedef'd struct. Just make the name the
+        # typename or varname
+        if isinstance(self.current_parent, c_ast.TypeDecl):
+          name = self.current_parent.declname
+        else:
+          #name = 'unnamed_union_%d' % (self._unnamed_unions)
+          node.name = 'unnamed_union_%d' % (self._unnamed_unions)
+          name = node.name
+          self._unnamed_unions += 1
+      else:
+        name = node.name
+
+      #s_gen = struct_def_generator(name)
+      #self.unions[name] = s_gen.generate(node)
+      self.unions[name] = node
 
     old_parent = self.current_parent
     self.current_parent = node
@@ -100,13 +150,16 @@ class struct_visitor(c_ast.NodeVisitor):
     self.current_parent = old_parent
 
 def generate_struct_defs(filename):
-  #p = GnuCParser()
   ast = parse_file(filename, use_cpp=True)
-  #ast = p.parse(open(filename, 'rb').read())
   ast.show()
   sv = struct_visitor()
   sv.visit(ast)
-  return sv.structs
+
+  
+  parsed_structs = dict([(name, struct_def_generator(name).generate(node)) for name, node in sv.structs.iteritems()])
+  parsed_unions = dict([(name, struct_def_generator(name).generate(node)) for name, node in sv.unions.iteritems()])
+
+  return parsed_structs, parsed_unions
 
 c_type_map = {
     'int': ctypes.c_int,
@@ -120,18 +173,30 @@ c_type_map = {
     'unsigned short': ctypes.c_ushort
 }
 
-def generate_ctypes_struct(struct_defs, struct_name):
-  struct_def = struct_defs[struct_name]
+# TODO: Add alignment kwarg
+# TODO: With addition of Union type, names make less sense. Fix
+def generate_ctypes_struct(struct_defs, union_defs, struct_name):
   struct_fields = []
+
+  # TODO: 'struct' and 'union' should probably be enums instead
+  udt_type = 'struct'
+  struct_def = struct_defs.get(struct_name)
+  if struct_def == None:
+    udt_type = 'union'
+    struct_def = union_defs.get(struct_name)
+    if struct_def == None:
+      print("Could not find type %s in structure/union dictionaries. Exiting..." % (struct_name))
+      exit(1)
 
   for field in struct_def:
     varname, typename, dims = field
+    
     field_type = c_type_map.get(typename)
     # Right now type is either a basic type or a struct in our struct_defs
     if field_type == None:
       if typename == '<anonymous_struct>':
         typename = varname
-      field_type = generate_ctypes_struct(struct_defs, typename)
+      field_type = generate_ctypes_struct(struct_defs, union_defs, typename)
 
     # Handle array types
     for dim in dims:
@@ -139,8 +204,14 @@ def generate_ctypes_struct(struct_defs, struct_name):
         field_type *= dim
 
     struct_fields.append((varname, field_type))
+
+
+  if udt_type == 'struct':
+    base_cls = ctypes.Structure
+  else:
+    base_cls = ctypes.Union
     
-  class temp_struct(ctypes.Structure):
+  class temp_struct(base_cls):
     _fields_ = struct_fields
 
     # Add this load method to make loading from a
@@ -170,6 +241,9 @@ def getdict(ct_struct):
 
   return result
 
+# kwargs are options passed to json.dumps
+def struct2json(ct_struct, **kwargs):
+  return json.dumps(getdict(s), kwargs)
 
 def read_simple_bin_file(filename, struct_type):
   with open(filename, 'rb') as ifile:
@@ -181,16 +255,23 @@ def read_simple_bin_file(filename, struct_type):
       s.load(frame)
       print(json.dumps(getdict(s), indent=4, separators=(',',': ')))
       
-
-
 if __name__ == '__main__':
-  struct_defs = generate_struct_defs(sys.argv[1])
+  struct_defs, union_defs = generate_struct_defs(sys.argv[1])
   print('Struct defs:')
   pprint(struct_defs)
   print()
 
+  print('Union defs:')
+  pprint(union_defs)
+  print()
+
   print('Generating ctypes Structure...')
-  gened_struct = generate_ctypes_struct(struct_defs, 'nd_struct')
+  if len(sys.argv) > 2:
+    struct_name = sys.argv[2]
+  else:
+    struct_name = 'nd_struct'
+
+  gened_struct = generate_ctypes_struct(struct_defs, union_defs, struct_name)
   print('Gened struct:')
   print('\ttype:', type(gened_struct))
   print('\tsizeof:', ctypes.sizeof(gened_struct))
@@ -203,6 +284,6 @@ if __name__ == '__main__':
   json_out = json.dumps(getdict(gs), indent=4, separators=(',',': '))
   print(json_out)
 
-  read_simple_bin_file('outbin.bin', gened_struct)
+  #read_simple_bin_file('outbin.bin', gened_struct)
 
 

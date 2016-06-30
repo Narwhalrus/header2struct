@@ -21,6 +21,7 @@ int main()
     test_struct.my_n_struct.a++;
     test_struct.my_n_struct.b += 0.1;
     test_struct.my_n_struct.c += 0.2;
+    test_struct.anon_union.ua = 255;
   }
 
   outbin.close();
