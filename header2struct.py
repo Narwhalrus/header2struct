@@ -240,7 +240,8 @@ class ctypes_struct_generator:
 
   def process_hfile(self):
     ast = parse_file(self.hfile, use_cpp=True)
-    ast.show()
+    # DEBUG
+    #ast.show()
 
     # Generate simplified representations of structs and unions
     sv = struct_visitor()
