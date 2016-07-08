@@ -79,7 +79,6 @@ class struct_def_generator(c_ast.NodeVisitor):
       # If our decl is unnamed, just name it after the type
       name = node.type.name
 
-    print('PROCESSING', name)
 
     dims = []
     # TODO: Assumption: type will either be a TypeDecl (basic types and structs),
@@ -92,17 +91,12 @@ class struct_def_generator(c_ast.NodeVisitor):
     # We'll also accumulate array dimensions
     while isinstance(field_type, c_ast.ArrayDecl):
       is_array = True
-      print('******************')
-      print(type(node.type.dim).__name__)
       array_size = 0
       # We have to resolve an expression in our array def
       if isinstance(node.type.dim, c_ast.BinaryOp):
         op = node.type.dim
-        print('Found binary op')
-        print(type(op.op), op)
         # TODO: Remember to remove
         array_size = resolve_binary_op(op)
-        print('Resolved binary op to', array_size)
       else:
         array_size = int(node.type.dim.value)
         
@@ -118,10 +112,10 @@ class struct_def_generator(c_ast.NodeVisitor):
     # Try testing with a typedef of a basic type and see what happens.
     # I'll probably have to keep track of all typedefs and resolve at some
     # point...
+    # If this test fails, field doesn't have a typedecl. This will occur for 
+    # Anonymous structs and unions
     if isinstance(field_type, c_ast.TypeDecl):
       field_type = field_type.type
-    else:
-      print('I guess this doesnt have a type decl...')
 
     # Handle structs and basic types differently
     if isinstance(field_type, c_ast.Struct) or isinstance(field_type, c_ast.Union):
@@ -223,22 +217,15 @@ class typedef_resolver(c_ast.NodeVisitor):
     self.typedef_map = {}
 
   def visit_Typedef(self, node):
-    print('**************************')
-    print ('IN TYPEDEF VISIT!')
-    print('**************************')
     name = node.name
     type_decl = node.type
-    print(type_decl.declname)
     alias = type_decl.declname
     if isinstance(type_decl.type, c_ast.IdentifierType):
       typename = ' '.join(type_decl.type.names)
       self.typedef_map[alias] = typename
-      print(alias,':',typename)
     elif isinstance(type_decl.type, c_ast.Struct) or isinstance(type_decl.type, c_ast.Union):
       typename = type_decl.type.name
       self.typedef_map[alias] = typename
-      print('Found struct td!')
-      print(alias,':',typename)
 
 #
 # This class takes a header file, processes the structures/unions in the file, and can generate a 
@@ -369,10 +356,8 @@ def get_csv_header(ct_struct):
   for field, _ in ct_struct._fields_:
     value = getattr(ct_struct, field)
     if hasattr(value, '_length_') and hasattr(value, '_type_'):
-      print('found array %s' % (field))
       value = list(value)
       temp_elems = ['%s[%d]' % (field, idx) for idx in xrange(len(value))]
-      print(type(value[0]))
       if hasattr(value[0], '_fields_'):
         cached_infields = get_csv_header(value[0])
         struct_fields = []
@@ -382,11 +367,8 @@ def get_csv_header(ct_struct):
 
       result += temp_elems
     elif hasattr(value, '_fields_'):
-      print('found struct %s' % (field))
-      result += ['.'.join([field, infield]) for infield in get_csv_header(value)]
+      result += ['%s.%s' % (field, infield) for infield in get_csv_header(value)]
     else:
-      print('found simple type')
-      print(type(value))
       result.append(field)
 
   return result
@@ -395,11 +377,11 @@ def get_csv_row(ct_struct):
   result = []
   for field, _ in ct_struct._fields_:
     value = getattr(ct_struct, field)
+    # Looks like an array
     if hasattr(value, '_length_') and hasattr(value, '_type_'):
-      print('found array %s' % (field))
       value = list(value)
       temp_values = value
-      print(type(value[0]))
+      # Array of structure elements. 
       if hasattr(value[0], '_fields_'):
         struct_fields = []
         for struct_elem in temp_values:
@@ -407,12 +389,11 @@ def get_csv_row(ct_struct):
         temp_values = struct_fields
 
       result += temp_values
+    # Structure
     elif hasattr(value, '_fields_'):
-      print('found struct %s' % (field))
       result += get_csv_row(value)
+    # Primative type
     else:
-      print('found simple type')
-      print(type(value))
       result.append(value)
 
   return result
@@ -428,14 +409,13 @@ def struct2json(ct_struct, **kwargs):
 def read_simple_bin_file(filename, struct_type):
   with open(filename, 'rb') as ifile:
     struct_size = struct.unpack('I', ifile.read(4))[0]
-    print(struct_size)
 
     s = struct_type() 
     records = []
     for frame in iter(lambda: ifile.read(struct_size), ''):
       s.load(frame)
+      # Have to copy objects into our array, otherwise we'll end up with a bunch of references to 's'
       records.append(copy.copy(s))
-      #print(json.dumps(getdict(s), indent=4, separators=(',',': ')))
 
     return records
 
@@ -475,7 +455,4 @@ if __name__ == '__main__':
   else:
     print('Couldn\'t find struct %s in given header file.')
     exit(1)
-
-
-
 
