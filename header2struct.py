@@ -8,6 +8,7 @@ import struct
 from collections import OrderedDict
 from pprint import pprint
 import operator
+import copy
 
 try:
   from pycparser import parse_file, c_parser, c_ast
@@ -22,6 +23,7 @@ op_map = {
   "/": operator.div
 }
 
+# TODO: No way to handle pointers
 c_type_map = {
     'int': ctypes.c_int,
     'unsigned int': ctypes.c_uint,
@@ -123,6 +125,7 @@ class struct_def_generator(c_ast.NodeVisitor):
 
     # Handle structs and basic types differently
     if isinstance(field_type, c_ast.Struct) or isinstance(field_type, c_ast.Union):
+      # TODO: Check naming. Anonymous structure may not mean what I think it means...
       # If structure name is None, we're dealing with an anonymous struct
       if field_type.name == None:
         typename = '<anonymous_struct>' 
@@ -185,6 +188,7 @@ class struct_visitor(c_ast.NodeVisitor):
         if isinstance(self.current_parent, c_ast.TypeDecl):
           name = self.current_parent.declname
         else:
+          # TODO: ctypes has the ability to handle anonymous structures and unions
           #name = 'unnamed_union_%d' % (self._unnamed_unions)
           node.name = 'unnamed_union_%d' % (self._unnamed_unions)
           name = node.name
@@ -333,6 +337,16 @@ class ctypes_struct_generator:
 #
 # Utility functions
 #
+
+# Simple function for generating struct
+def gen_struct(hfile, struct_name):
+  gen = ctypes_struct_generator(hfile)
+  gen.process_hfile()
+  return gen.generate_ctypes_struct(struct_name)
+
+def is_simple_ctype(t):
+  return isinstance(t, ctypes._SimpleCData)
+
 #TODO: This can be made better.
 def getdict(ct_struct):
   result = OrderedDict()
@@ -350,19 +364,92 @@ def getdict(ct_struct):
 
   return result
 
+def get_csv_header(ct_struct):
+  result = []
+  for field, _ in ct_struct._fields_:
+    value = getattr(ct_struct, field)
+    if hasattr(value, '_length_') and hasattr(value, '_type_'):
+      print('found array %s' % (field))
+      value = list(value)
+      temp_elems = ['%s[%d]' % (field, idx) for idx in xrange(len(value))]
+      print(type(value[0]))
+      if hasattr(value[0], '_fields_'):
+        cached_infields = get_csv_header(value[0])
+        struct_fields = []
+        for temp_elem in temp_elems:
+          struct_fields += ['%s.%s' % (temp_elem, infield) for infield in cached_infields]
+        temp_elems = struct_fields
+
+      result += temp_elems
+    elif hasattr(value, '_fields_'):
+      print('found struct %s' % (field))
+      result += ['.'.join([field, infield]) for infield in get_csv_header(value)]
+    else:
+      print('found simple type')
+      print(type(value))
+      result.append(field)
+
+  return result
+
+def get_csv_row(ct_struct):
+  result = []
+  for field, _ in ct_struct._fields_:
+    value = getattr(ct_struct, field)
+    if hasattr(value, '_length_') and hasattr(value, '_type_'):
+      print('found array %s' % (field))
+      value = list(value)
+      temp_values = value
+      print(type(value[0]))
+      if hasattr(value[0], '_fields_'):
+        struct_fields = []
+        for struct_elem in temp_values:
+          struct_fields += get_csv_row(struct_elem)
+        temp_values = struct_fields
+
+      result += temp_values
+    elif hasattr(value, '_fields_'):
+      print('found struct %s' % (field))
+      result += get_csv_row(value)
+    else:
+      print('found simple type')
+      print(type(value))
+      result.append(value)
+
+  return result
+
 # kwargs are options passed to json.dumps
 def struct2json(ct_struct, **kwargs):
   return json.dumps(getdict(s), kwargs)
 
+# Reads a simple binary file of struct records and returns array of ctypes struct objects
+# TODO: This format can be further simplified to not require the 
+# size tacked onto the front of the file, though adding size to the front
+# could help detect alignment mismatch or structure mismatch.
 def read_simple_bin_file(filename, struct_type):
   with open(filename, 'rb') as ifile:
     struct_size = struct.unpack('I', ifile.read(4))[0]
     print(struct_size)
 
     s = struct_type() 
+    records = []
     for frame in iter(lambda: ifile.read(struct_size), ''):
       s.load(frame)
-      print(json.dumps(getdict(s), indent=4, separators=(',',': ')))
+      records.append(copy.copy(s))
+      #print(json.dumps(getdict(s), indent=4, separators=(',',': ')))
+
+    return records
+
+# 'records' is an array of ctypes struct objects
+def write_csv_file(filename, records):
+  with open(filename, 'w') as ofile:
+    # Write header
+    ofile.write(','.join(get_csv_header(records[0])) + '\n')
+    for record in records:
+      ofile.write(','.join([str(elem) for elem in get_csv_row(record)]) + '\n')
+
+def bin2csv(infile, outfile, struct_type):
+  records = read_simple_bin_file(infile, struct_type)
+  write_csv_file(outfile, records)
       
 if __name__ == '__main__':
   struct_generator = ctypes_struct_generator(sys.argv[1])
