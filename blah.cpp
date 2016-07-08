@@ -19,7 +19,7 @@ int main()
     outbin.write(reinterpret_cast<char *>(&test_struct), sizeof(nd_struct));
     test_struct.inside_decl[1].f++;
     test_struct.my_n_struct.a++;
-    test_struct.my_n_struct.b += 0.1;
+    test_struct.my_td_struct_2.h += 0.1;
     test_struct.my_n_struct.c += 0.2;
     test_struct.anon_union.ua = 255;
   }

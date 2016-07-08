@@ -9,7 +9,6 @@ from collections import OrderedDict
 from pprint import pprint
 import operator
 
-
 try:
   from pycparser import parse_file, c_parser, c_ast
 except ImportError:
@@ -35,9 +34,8 @@ c_type_map = {
     'unsigned short': ctypes.c_ushort
 }
 
-
+# Takes a binary op node and resolves to a value
 def resolve_binary_op(binary_op_obj):
-
   op_fnc = op_map.get(binary_op_obj.op)
   if op_fnc == None:
     print('Could not find operator function for', binary_op_obj.op)
@@ -58,7 +56,9 @@ def resolve_binary_op(binary_op_obj):
 
   return op_fnc(left_val, right_val)
   
-# This class takes a single Struct AST node and parses out all the fields
+#
+# This visitor takes a single Struct AST node and parses out all the fields
+#
 class struct_def_generator(c_ast.NodeVisitor):
   def __init__(self, struct_id):
     self.struct_id = struct_id
@@ -138,7 +138,9 @@ class struct_def_generator(c_ast.NodeVisitor):
     field = (name, typename, dims)
     self.fields.append(field)
 
+#
 # This visitor finds all structures in the file being parsed.
+#
 class struct_visitor(c_ast.NodeVisitor):
   def __init__(self):
     self.current_parent = None
@@ -209,6 +211,9 @@ class struct_visitor(c_ast.NodeVisitor):
     self.current_parent = old_parent
 
 
+#
+# This visitor tries to resolve any typedefs to their indentifier type
+#
 class typedef_resolver(c_ast.NodeVisitor):
   def __init__(self):
     self.typedef_map = {}
@@ -225,75 +230,109 @@ class typedef_resolver(c_ast.NodeVisitor):
       typename = ' '.join(type_decl.type.names)
       self.typedef_map[alias] = typename
       print(alias,':',typename)
+    elif isinstance(type_decl.type, c_ast.Struct) or isinstance(type_decl.type, c_ast.Union):
+      typename = type_decl.type.name
+      self.typedef_map[alias] = typename
+      print('Found struct td!')
+      print(alias,':',typename)
 
+#
+# This class takes a header file, processes the structures/unions in the file, and can generate a 
+# ctypes struct representation of any structure/union found in that file.
+#
+class ctypes_struct_generator:
+  def __init__(self, hfile):
+    self.hfile = hfile
+    self._struct_defs = {}
+    self._union_defs = {}
+    self._typedef_map = {}
+
+  def process_hfile(self):
+    ast = parse_file(self.hfile, use_cpp=True)
+    ast.show()
+
+    # Generate simplified representations of structs and unions
+    sv = struct_visitor()
+    sv.visit(ast)
     
+    # Generate typedef map
+    tdr = typedef_resolver()
+    tdr.visit(ast)
 
-def generate_struct_defs(filename):
-  ast = parse_file(filename, use_cpp=True)
-  ast.show()
-  sv = struct_visitor()
-  sv.visit(ast)
-  
-  tdr = typedef_resolver()
-  tdr.visit(ast)
+    self._struct_defs = dict([(name, struct_def_generator(name).generate(node)) for name, node in sv.structs.iteritems()])
+    self._union_defs = dict([(name, struct_def_generator(name).generate(node)) for name, node in sv.unions.iteritems()])
+    self._typedef_map = tdr.typedef_map
 
-  
-  parsed_structs = dict([(name, struct_def_generator(name).generate(node)) for name, node in sv.structs.iteritems()])
-  parsed_unions = dict([(name, struct_def_generator(name).generate(node)) for name, node in sv.unions.iteritems()])
+  def list_structs(self):
+    return [name for name, data in self._struct_defs.iteritems()]
 
-  return parsed_structs, parsed_unions
+  def list_unions(self):
+    return [name for name, data in self._union_defs.iteritems()]
 
-# TODO: Add alignment kwarg
-# TODO: With addition of Union type, names make less sense. Fix
-def generate_ctypes_struct(struct_defs, union_defs, struct_name):
-  struct_fields = []
+  # TODO: Might need optional argument for alignment
+  def generate_ctypes_struct(self, struct_name):
+    struct_fields = []
+    # Type of "struct". In reality this can generate a ctypes union or struct
+    user_defined_type = 'struct';
 
-  # TODO: 'struct' and 'union' should probably be enums instead
-  udt_type = 'struct'
-  struct_def = struct_defs.get(struct_name)
-  if struct_def == None:
-    udt_type = 'union'
-    struct_def = union_defs.get(struct_name)
-    if struct_def == None:
-      print("Could not find type %s in structure/union dictionaries. Exiting..." % (struct_name))
-      exit(1)
+    # Check to see if typedef to struct/union exists
+    struct_name_temp = self._typedef_map.get(struct_name)
+    if struct_name_temp != None:
+      struct_name = struct_name_temp
 
-  for field in struct_def:
-    varname, typename, dims = field
-    
-    field_type = c_type_map.get(typename)
-    # Right now type is either a basic type or a struct in our struct_defs
-    if field_type == None:
-      if typename == '<anonymous_struct>':
-        typename = varname
-      field_type = generate_ctypes_struct(struct_defs, union_defs, typename)
+    definition = self._struct_defs.get(struct_name)
+    if definition == None:
+      # Couldn't find a struct. Try union
+      definition = self._union_defs.get(struct_name)
+      user_defined_type = 'union'
 
-    # Handle array types
-    for dim in dims:
-      if dim > 1:
-        field_type *= dim
+      if definition == None:
+        # Couldn't find a struct, union, or typedef to either. Give up
+        print('Couldn\'t find struct or union in %s with name %s.' % (self.hfile, struct_name))
+        return None
 
-    struct_fields.append((varname, field_type))
+    for field in definition:
+      varname, typename, dims = field
+      
+      field_type = c_type_map.get(typename)
+      if field_type == None:
+        # Check if type is a typedef that resolves to a ctype
+        field_type = c_type_map.get(self._typedef_map.get(typename))
 
+      # Right now type is either a basic type or a struct in our struct_defs
+      if field_type == None:
+        if typename == '<anonymous_struct>':
+          typename = varname
+        field_type = self.generate_ctypes_struct(typename)
 
-  if udt_type == 'struct':
-    base_cls = ctypes.Structure
-  else:
-    base_cls = ctypes.Union
-    
-  class temp_struct(base_cls):
-    _fields_ = struct_fields
+      # Handle array types
+      for dim in dims:
+        if dim > 1:
+          field_type *= dim
 
-    # Add this load method to make loading from a
-    # python byte string easier
-    def load(self, bytes):
-      fit = min(len(bytes), ctypes.sizeof(self))
-      ctypes.memmove(ctypes.addressof(self), bytes, fit)
+      struct_fields.append((varname, field_type))
 
-  temp_struct.__name__ = struct_name
+    if user_defined_type == 'struct':
+      base_cls = ctypes.Structure
+    else:
+      base_cls = ctypes.Union
+      
+    class temp_struct(base_cls):
+      _fields_ = struct_fields
 
-  return temp_struct
+      # Add this load method to make loading from a
+      # python byte string easier
+      def load(self, bytes):
+        fit = min(len(bytes), ctypes.sizeof(self))
+        ctypes.memmove(ctypes.addressof(self), bytes, fit)
 
+    temp_struct.__name__ = struct_name
+
+    return temp_struct
+
+#
+# Utility functions
+#
 #TODO: This can be made better.
 def getdict(ct_struct):
   result = OrderedDict()
@@ -326,34 +365,30 @@ def read_simple_bin_file(filename, struct_type):
       print(json.dumps(getdict(s), indent=4, separators=(',',': ')))
       
 if __name__ == '__main__':
-  struct_defs, union_defs = generate_struct_defs(sys.argv[1])
-  print('Struct defs:')
-  pprint(struct_defs)
-  print()
+  struct_generator = ctypes_struct_generator(sys.argv[1])
+  print('Processing %s' % sys.argv[1])
+  struct_generator.process_hfile()
+  print('Found structures:')
+  print(struct_generator.list_structs())
+  print('Found unions:')
+  print(struct_generator.list_unions())
+  struct_name = raw_input('Enter the struct/union you wish to generate: ')
+  if struct_name in struct_generator.list_structs() or struct_name in struct_generator.list_unions():
+    print('Generating ctypes struct for %s' % (struct_name))
+    my_struct = struct_generator.generate_ctypes_struct(struct_name)
+    my_obj = my_struct()
 
-  print('Union defs:')
-  pprint(union_defs)
-  print()
+    print('JSON serialized null object for generated struct:')
+    json_out = json.dumps(getdict(my_obj), indent=4, separators=(',',': '))
+    print(json_out)
 
-  print('Generating ctypes Structure...')
-  if len(sys.argv) > 2:
-    struct_name = sys.argv[2]
+    
+    raw_input('Press enter to read rsf binary file...')
+    read_simple_bin_file('outbin.bin', my_struct)
   else:
-    struct_name = 'nd_struct'
+    print('Couldn\'t find struct %s in given header file.')
+    exit(1)
 
-  gened_struct = generate_ctypes_struct(struct_defs, union_defs, struct_name)
-  print('Gened struct:')
-  print('\ttype:', type(gened_struct))
-  print('\tsizeof:', ctypes.sizeof(gened_struct))
-  print('\tfields:')
-  for field in gened_struct._fields_:
-    print('\t\t', field)
-  print()
 
-  gs = gened_struct()
-  json_out = json.dumps(getdict(gs), indent=4, separators=(',',': '))
-  print(json_out)
-
-  #read_simple_bin_file('outbin.bin', gened_struct)
 
 
