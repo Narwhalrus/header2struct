@@ -5,7 +5,7 @@ class shm_wrapper:
 	def __init__(self, cnfg_path):
 		assert isinstance(cnfg_path, str), "Config path must be a string."
 	
-		self.shm_iface_lib = CDLL("../c/lib/libshm_iface.so")
+		self.shm_iface_lib = CDLL("./libshm_iface.so")
 		self.shm_iface_lib.init_memmap(c_char_p(cnfg_path))
 		self._getSectNames()
 

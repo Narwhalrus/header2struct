@@ -95,7 +95,6 @@ class struct_def_generator(c_ast.NodeVisitor):
       # We have to resolve an expression in our array def
       if isinstance(node.type.dim, c_ast.BinaryOp):
         op = node.type.dim
-        # TODO: Remember to remove
         array_size = resolve_binary_op(op)
       else:
         array_size = int(node.type.dim.value)
